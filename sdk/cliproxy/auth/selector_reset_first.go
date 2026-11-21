@@ -62,3 +62,31 @@ func weeklyResetAt(auth *Auth, now time.Time) time.Time {
 	}
 	return resetAt
 }
+
+// urgentDrainWindow is how close a weekly reset must be for its credential to
+// pull already-bound sessions away from their current credential.
+const urgentDrainWindow = 24 * time.Hour
+
+// urgentDrainTarget returns a credential that should take over a session bound
+// to bound: its weekly quota resets within urgentDrainWindow and sooner than
+// bound's, so unused quota there would be lost. It returns nil otherwise.
+func urgentDrainTarget(candidates []*Auth, bound *Auth, now time.Time) *Auth {
+	var target *Auth
+	var targetReset time.Time
+	for _, candidate := range candidates {
+		resetAt := weeklyResetAt(candidate, now)
+		if candidate == nil || resetAt.IsZero() || resetAt.Sub(now) > urgentDrainWindow {
+			continue
+		}
+		if target == nil || resetAt.Before(targetReset) {
+			target, targetReset = candidate, resetAt
+		}
+	}
+	if target == nil || bound == nil || target.ID == bound.ID {
+		return nil
+	}
+	if boundReset := weeklyResetAt(bound, now); !boundReset.IsZero() && !targetReset.Before(boundReset) {
+		return nil
+	}
+	return target
+}

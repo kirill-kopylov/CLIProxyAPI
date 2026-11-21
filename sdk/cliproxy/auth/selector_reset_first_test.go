@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -109,5 +110,59 @@ func TestManagerPick_ResetFirstBehindSessionAffinity(t *testing.T) {
 	}
 	if picked.ID != soon.ID {
 		t.Fatalf("pickNext() = %q, want %q", picked.ID, soon.ID)
+	}
+}
+
+func TestUrgentDrainTarget(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	urgent := authWithWeeklyReset("urgent", now.Add(8*time.Hour))
+	farBound := authWithWeeklyReset("far", now.Add(72*time.Hour))
+	notUrgent := authWithWeeklyReset("not-urgent", now.Add(30*time.Hour))
+
+	if got := urgentDrainTarget([]*Auth{farBound, urgent}, farBound, now); got != urgent {
+		t.Fatalf("urgentDrainTarget() = %v, want urgent", got)
+	}
+	if got := urgentDrainTarget([]*Auth{farBound, urgent}, urgent, now); got != nil {
+		t.Fatalf("session already on the urgent auth must stay, got %v", got)
+	}
+	if got := urgentDrainTarget([]*Auth{farBound, notUrgent}, farBound, now); got != nil {
+		t.Fatalf("reset outside the urgent window must not rebind, got %v", got)
+	}
+	soonerBound := authWithWeeklyReset("sooner-bound", now.Add(2*time.Hour))
+	if got := urgentDrainTarget([]*Auth{soonerBound, urgent}, soonerBound, now); got != nil {
+		t.Fatalf("bound auth expiring even sooner must stay, got %v", got)
+	}
+}
+
+func TestSessionAffinityResetFirst_RebindsBoundSessionToUrgentAuth(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	far := authWithWeeklyReset("far", now.Add(72*time.Hour))
+	urgent := authWithWeeklyReset("urgent", now.Add(8*time.Hour))
+	urgent.Unavailable = true
+	urgent.NextRetryAfter = now.Add(time.Hour)
+
+	selector := NewSessionAffinitySelector(&ResetFirstSelector{})
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": []string{"urgent-drain-session"}}}
+	pick := func() string {
+		t.Helper()
+		got, err := selector.Pick(context.Background(), "claude", "claude-test", opts, []*Auth{far, urgent})
+		if err != nil {
+			t.Fatalf("Pick() error = %v", err)
+		}
+		return got.ID
+	}
+
+	if got := pick(); got != "far" {
+		t.Fatalf("first Pick() = %q, want far while urgent is cooling down", got)
+	}
+	urgent.Unavailable = false
+	urgent.NextRetryAfter = time.Time{}
+	if got := pick(); got != "urgent" {
+		t.Fatalf("Pick() after recovery = %q, want urgent", got)
+	}
+	if got := pick(); got != "urgent" {
+		t.Fatalf("Pick() must stay bound to urgent, got %q", got)
 	}
 }

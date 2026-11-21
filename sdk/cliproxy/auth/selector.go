@@ -1733,8 +1733,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				if target := s.urgentDrainTarget(fallbackAuths, auth, now); target != nil {
+					entry.Infof("session-affinity: urgent weekly drain, rebinding | session=%s from=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, target.ID, provider, model)
+					auth = target
+				} else {
+					entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				}
 				bind(auth.ID, true)
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 			}
 		}
@@ -2138,6 +2143,14 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	if s.matcher != nil {
 		s.matcher.InvalidateAuth(authID)
 	}
+}
+
+// urgentDrainTarget applies the reset-first urgent drain rule to a bound session.
+func (s *SessionAffinitySelector) urgentDrainTarget(candidates []*Auth, bound *Auth, now time.Time) *Auth {
+	if _, resetFirst := s.fallback.(*ResetFirstSelector); !resetFirst {
+		return nil
+	}
+	return urgentDrainTarget(candidates, bound, now)
 }
 
 // ForgetAuth forwards permanent credential removal to the fallback selector so
